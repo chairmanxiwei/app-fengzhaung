@@ -1,0 +1,25 @@
+node_modules/
+build-temp/
+build-workspace/
+output/
+uploads/
+data/tasks.json
+keystore/
+*.apk
+*.zip
+.env
+.env.local
+.DS_Store
+Thumbs.db
+debug.log
+
+# Android SDK (too large for git)
+android-sdk/jdk-*/
+android-sdk/android-sdk/
+android-sdk/gradle-8.0/
+android-sdk/*.zip
+android-sdk/.knownPackages
+
+# IDE
+.vscode/
+.idea/
