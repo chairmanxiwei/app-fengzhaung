@@ -54,7 +54,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 2 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowed = ['.png', '.jpg', '.jpeg', '.svg', '.webp'];
     const ext = path.extname(file.originalname).toLowerCase();
@@ -189,6 +189,11 @@ app.post('/api/upload-icon', rateLimit(30, 60000), upload.single('icon'), (req, 
 
 // ========== API-003: 创建构建任务 ==========
 app.post('/api/generate', rateLimit(20, 3600000), upload.single('icon'), (req, res) => {
+  // multer错误处理（文件超限等）
+  if (req.fileValidationError) {
+    return res.status(400).json({ success: false, message: req.fileValidationError, errorCode: 'FILE_INVALID' });
+  }
+
   // 参数提取（multer解析multipart后，text字段在req.body）
   const url = req.body.url;
   const appName = req.body.appName || '';
@@ -220,46 +225,74 @@ app.post('/api/generate', rateLimit(20, 3600000), upload.single('icon'), (req, r
     return res.status(400).json({ success: false, message: '包名格式不正确，至少需要两段（如 com.example.app）', errorCode: 'PACKAGE_NAME_INVALID' });
   }
 
-  // 创建任务
-  const taskId = `task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-  const downloadToken = crypto.randomBytes(24).toString('hex');
-  const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  // 构建环境检查
+  const envFile = path.join(__dirname, '.env.android');
+  let javaHome, androidHome;
+  if (fs.existsSync(envFile)) {
+    const envContent = fs.readFileSync(envFile, 'utf-8');
+    envContent.split('\n').forEach(line => {
+      const match = line.match(/^([^#=]+)=(.*)$/);
+      if (match) {
+        const key = match[1].trim();
+        if (key === 'JAVA_HOME') javaHome = match[2].trim();
+        if (key === 'ANDROID_HOME') androidHome = match[2].trim();
+      }
+    });
+  }
+  if (!javaHome || !androidHome || !fs.existsSync(javaHome) || !fs.existsSync(androidHome)) {
+    console.error('[Generate] 构建环境未就绪: JAVA_HOME=' + javaHome + ', ANDROID_HOME=' + androidHome);
+    return res.status(503).json({
+      success: false,
+      message: '构建环境未就绪，请先运行 node setup-android-env.js 安装 Android 构建环境',
+      errorCode: 'BUILD_ENV_NOT_READY'
+    });
+  }
 
-  const task = {
-    id: taskId,
-    url: resolvedUrl,
-    appName: appName || resolvedUrl.replace(/^https?:\/\//, '').split('.')[0],
-    packageName: packageName || `com.webpackage.app${crypto.randomBytes(3).toString('hex')}`,
-    iconPath: iconFile.path,
-    iconOriginalName: iconFile.originalname,
-    status: 'QUEUED',
-    progress: 0,
-    currentStep: '排队等待中',
-    errorCode: null,
-    errorMessage: null,
-    apkPath: null,
-    apkSize: null,
-    downloadToken,
-    downloadCount: 0,
-    maxDownloads: 5,
-    expiresAt,
-    createdAt: now,
-    updatedAt: now,
-  };
+  try {
+    // 创建任务
+    const taskId = `task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const downloadToken = crypto.randomBytes(24).toString('hex');
+    const now = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-  upsertTask(task);
+    const task = {
+      id: taskId,
+      url: resolvedUrl,
+      appName: appName || resolvedUrl.replace(/^https?:\/\//, '').split('.')[0],
+      packageName: packageName || `com.webpackage.app${crypto.randomBytes(3).toString('hex')}`,
+      iconPath: iconFile.path,
+      iconOriginalName: iconFile.originalname,
+      status: 'QUEUED',
+      progress: 0,
+      currentStep: '排队等待中',
+      errorCode: null,
+      errorMessage: null,
+      apkPath: null,
+      apkSize: null,
+      downloadToken,
+      downloadCount: 0,
+      maxDownloads: 5,
+      expiresAt,
+      createdAt: now,
+      updatedAt: now,
+    };
 
-  // 启动模拟构建流程（异步）
-  simulateBuild(taskId);
+    upsertTask(task);
 
-  res.status(201).json({
-    success: true,
-    taskId,
-    message: '任务创建成功',
-    estimatedTime: 45,
-    websocketUrl: `/ws/${taskId}`
-  });
+    // 启动构建流程（异步）
+    simulateBuild(taskId);
+
+    res.status(201).json({
+      success: true,
+      taskId,
+      message: '任务创建成功',
+      estimatedTime: 45,
+      websocketUrl: `/ws/${taskId}`
+    });
+  } catch (err) {
+    console.error('[Generate] 任务创建异常:', err.message);
+    res.status(500).json({ success: false, message: '任务创建失败: ' + err.message, errorCode: 'INTERNAL_ERROR' });
+  }
 });
 
 // ========== API-004: 查询任务状态 ==========
@@ -356,6 +389,21 @@ app.get('/api/download/:taskId', (req, res) => {
 
 // ========== 静态文件 ==========
 app.use('/uploads', express.static(uploadDir));
+
+// ========== Multer 错误处理中间件 ==========
+app.use((err, req, res, next) => {
+  if (err.name === 'MulterError') {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ success: false, message: '文件大小超过 5MB 限制', errorCode: 'FILE_TOO_LARGE' });
+    }
+    return res.status(400).json({ success: false, message: '文件上传错误: ' + err.message, errorCode: 'UPLOAD_ERROR' });
+  }
+  if (err) {
+    console.error('[Server] 未捕获错误:', err.message);
+    return res.status(500).json({ success: false, message: '服务器内部错误', errorCode: 'INTERNAL_ERROR' });
+  }
+  next();
+});
 
 // ========== 真实Gradle构建流程 ==========
 const BUILD_STEPS = [

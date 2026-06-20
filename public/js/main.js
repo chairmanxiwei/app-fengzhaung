@@ -1,7 +1,50 @@
 /**
- * Web2App - 前端交互逻辑
- * 包含：网址验证、图标上传、操作指引、构建进度
+ * Web-Package - 前端交互逻辑
+ * 包含：启动动画、网址验证、图标上传、操作指引、构建进度
  */
+
+// ========== Splash Screen (runs immediately) ==========
+(function() {
+  var bar = document.getElementById('splashBar');
+  var pct = document.getElementById('splashPct');
+  var splash = document.getElementById('splash');
+  if (!bar || !pct || !splash) return;
+
+  var progress = 0;
+  var done = false;
+
+  function setProgress(v) {
+    progress = Math.min(v, 100);
+    bar.style.width = progress + '%';
+    pct.textContent = Math.round(progress) + '%';
+  }
+
+  // Simulate progress: fast to 70, slow to 90, wait for real load
+  var timer = setInterval(function() {
+    if (done) return;
+    if (progress < 70) setProgress(progress + Math.random() * 12 + 3);
+    else if (progress < 90) setProgress(progress + Math.random() * 2 + 0.5);
+  }, 200);
+
+  function finish() {
+    if (done) return;
+    done = true;
+    clearInterval(timer);
+    setProgress(100);
+    setTimeout(function() {
+      splash.classList.add('hide');
+      setTimeout(function() { splash.remove(); }, 700);
+    }, 400);
+  }
+
+  // Finish on full page load
+  window.addEventListener('load', function() {
+    setTimeout(finish, 300);
+  });
+
+  // Fallback: auto-finish after 5s even if load event didn't fire
+  setTimeout(finish, 5000);
+})();
 
 (function () {
   'use strict';
@@ -216,7 +259,137 @@
 
   // ========== 图标上传 ==========
   const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/svg+xml', 'image/webp'];
-  const MAX_SIZE = 2 * 1024 * 1024; // 2MB
+  const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+
+  // ========== 图片裁剪 ==========
+  let cropper = null;
+  let pendingCropFile = null;
+  const cropModal = $safe('#cropModal');
+  const cropImage = $safe('#cropImage');
+  const cropConfirmBtn = $safe('#cropConfirmBtn');
+  const cropCancelBtn = $safe('#cropCancelBtn');
+  const cropModalClose = $safe('#cropModalClose');
+
+  function openCropModal(file) {
+    pendingCropFile = file;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      cropImage.src = e.target.result;
+      cropModal.style.display = 'flex';
+      document.body.style.overflow = 'hidden';
+
+      // Destroy previous cropper instance
+      if (cropper) {
+        cropper.destroy();
+        cropper = null;
+      }
+
+      // Wait for image to load before initializing cropper
+      cropImage.onload = () => {
+        cropper = new Cropper(cropImage, {
+          aspectRatio: 1,
+          viewMode: 1,
+          dragMode: 'move',
+          autoCropArea: 0.9,
+          responsive: true,
+          restore: false,
+          guides: true,
+          center: true,
+          highlight: true,
+          cropBoxMovable: true,
+          cropBoxResizable: true,
+          toggleDragModeOnDblclick: false,
+          preview: [
+            document.getElementById('cropPreview64'),
+            document.getElementById('cropPreview48'),
+            document.getElementById('cropPreview32'),
+          ],
+        });
+      };
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function closeCropModal() {
+    if (cropper) {
+      cropper.destroy();
+      cropper = null;
+    }
+    cropModal.style.display = 'none';
+    document.body.style.overflow = '';
+    pendingCropFile = null;
+    cropImage.src = '';
+  }
+
+  // Crop modal close buttons
+  cropModalClose.addEventListener('click', closeCropModal);
+  cropCancelBtn.addEventListener('click', closeCropModal);
+  cropModal.addEventListener('click', (e) => {
+    if (e.target === cropModal) closeCropModal();
+  });
+
+  // Aspect ratio buttons
+  $$('.crop-aspect-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      $$('.crop-aspect-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      if (cropper) {
+        const ratio = parseFloat(btn.dataset.ratio);
+        cropper.setAspectRatio(ratio === 0 ? NaN : ratio);
+      }
+    });
+  });
+
+  // Tool buttons
+  $safe('#cropRotateLeft').addEventListener('click', () => {
+    if (cropper) cropper.rotate(-90);
+  });
+  $safe('#cropRotateRight').addEventListener('click', () => {
+    if (cropper) cropper.rotate(90);
+  });
+  $safe('#cropZoomIn').addEventListener('click', () => {
+    if (cropper) cropper.zoom(0.1);
+  });
+  $safe('#cropZoomOut').addEventListener('click', () => {
+    if (cropper) cropper.zoom(-0.1);
+  });
+  $safe('#cropReset').addEventListener('click', () => {
+    if (cropper) cropper.reset();
+  });
+
+  // Confirm crop
+  cropConfirmBtn.addEventListener('click', () => {
+    if (!cropper) return;
+
+    const canvas = cropper.getCroppedCanvas({
+      width: 512,
+      height: 512,
+      imageSmoothingEnabled: true,
+      imageSmoothingQuality: 'high',
+    });
+
+    if (!canvas) {
+      showToast('裁剪失败，请重试', 'error');
+      return;
+    }
+
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        showToast('裁剪失败，请重试', 'error');
+        return;
+      }
+
+      // Create a new File from the blob
+      const croppedFile = new File([blob], pendingCropFile ? pendingCropFile.name.replace(/\.\w+$/, '.png') : 'icon.png', {
+        type: 'image/png',
+        lastModified: Date.now(),
+      });
+
+      closeCropModal();
+      state.iconFile = croppedFile;
+      simulateUpload(croppedFile);
+    }, 'image/png');
+  });
 
   function handleFile(file) {
     // 类型检查
@@ -227,12 +400,19 @@
 
     // 大小检查
     if (file.size > MAX_SIZE) {
-      showToast('文件大小超过 2MB 限制', 'error');
+      showToast('文件大小超过 5MB 限制', 'error');
       return;
     }
 
-    state.iconFile = file;
-    simulateUpload(file);
+    // SVG files skip cropping (vector format)
+    if (file.type === 'image/svg+xml') {
+      state.iconFile = file;
+      simulateUpload(file);
+      return;
+    }
+
+    // Open crop modal for raster images
+    openCropModal(file);
   }
 
   function simulateUpload(file) {
@@ -398,7 +578,13 @@
         body: formData,
       });
 
-      const result = await response.json();
+      let result;
+      try {
+        result = await response.json();
+      } catch {
+        showToast('服务器响应异常 (HTTP ' + response.status + ')', 'error');
+        return;
+      }
 
       if (result.success) {
         showToast('任务创建成功');
@@ -406,7 +592,12 @@
         // 连接WebSocket接收真实进度
         connectBuildProgress(result.taskId);
       } else {
-        showToast(result.message || '创建任务失败', 'error');
+        const msg = result.message || '创建任务失败';
+        showToast(msg, 'error');
+        // 特殊处理：构建环境未就绪
+        if (result.errorCode === 'BUILD_ENV_NOT_READY') {
+          showToast('请先运行 node setup-android-env.js 安装构建环境', 'warning');
+        }
       }
     } catch (err) {
       showToast('网络错误，请稍后重试', 'error');
