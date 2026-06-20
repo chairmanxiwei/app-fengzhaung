@@ -113,9 +113,15 @@
       error: '✕',
       warning: '⚠',
     };
-    toast.innerHTML = `<span>${icons[type] || ''}</span><span>${message}</span>`;
+    toast.innerHTML = `<span>${icons[type] || ''}</span><span>${escHtml(message)}</span>`;
     container.appendChild(toast);
     setTimeout(() => toast.remove(), 3000);
+  }
+
+  function escHtml(str) {
+    const d = document.createElement('div');
+    d.textContent = str || '';
+    return d.innerHTML;
   }
 
   function formatFileSize(bytes) {
@@ -164,13 +170,13 @@
       urlStatus.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
 
       if (result.warning) {
-        urlSuccess.innerHTML = `<span>⚠</span><span>${result.message}</span>`;
+        urlSuccess.innerHTML = `<span>⚠</span><span>${escHtml(result.message)}</span>`;
         urlSuccess.style.display = 'flex';
         urlSuccess.style.background = '#FFFBEB';
         urlSuccess.style.borderColor = '#FBBF24';
         urlSuccess.style.color = '#92400E';
       } else {
-        urlSuccess.innerHTML = `<span>✓</span><span>${result.message}</span>`;
+        urlSuccess.innerHTML = `<span>✓</span><span>${escHtml(result.message)}</span>`;
         urlSuccess.style.display = 'flex';
         urlSuccess.style.background = '';
         urlSuccess.style.borderColor = '';
@@ -183,7 +189,7 @@
       urlInputWrapper.classList.remove('success');
       urlInputWrapper.classList.add('error');
       urlStatus.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#EF4444" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-      urlError.innerHTML = `<span>✕</span><span>${result.message}</span>`;
+      urlError.innerHTML = `<span>✕</span><span>${escHtml(result.message)}</span>`;
       urlError.style.display = 'flex';
       state.urlValid = false;
     }
@@ -573,8 +579,14 @@
       if (appNameInput.value.trim()) formData.append('appName', appNameInput.value.trim());
       if (packageNameInput.value.trim()) formData.append('packageName', packageNameInput.value.trim());
 
+      // 添加JWT token（如果已登录）
+      const headers = {};
+      const token = window.wpAuth ? window.wpAuth.getToken() : null;
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+
       const response = await fetch('/api/generate', {
         method: 'POST',
+        headers,
         body: formData,
       });
 
@@ -588,6 +600,17 @@
 
       if (result.success) {
         showToast('任务创建成功');
+        // 未登录时保存临时任务到sessionStorage
+        if (window.wpAuth && !window.wpAuth.isLoggedIn()) {
+          window.wpAuth.saveGuestTask({
+            taskId: result.taskId,
+            appName: appNameInput.value.trim() || urlResult.url.replace(/^https?:\/\//, '').split('.')[0],
+            status: 'BUILDING',
+            createdAt: new Date().toISOString(),
+          });
+        }
+        // 刷新配额显示
+        if (window.wpAuth) window.wpAuth.showQuotaBar();
         openBuildModal(result.taskId);
         // 连接WebSocket接收真实进度
         connectBuildProgress(result.taskId);
@@ -597,6 +620,12 @@
         // 特殊处理：构建环境未就绪
         if (result.errorCode === 'BUILD_ENV_NOT_READY') {
           showToast('请先运行 node setup-android-env.js 安装构建环境', 'warning');
+        }
+        // 特殊处理：配额用完
+        if (result.errorCode === 'QUOTA_EXCEEDED') {
+          if (window.wpAuth && !window.wpAuth.isLoggedIn()) {
+            showToast('今日构建次数已用完，登录后可享20次/天', 'warning');
+          }
         }
       }
     } catch (err) {
@@ -754,6 +783,10 @@
       if (data.downloadUrl) {
         currentDownloadUrl = data.downloadUrl;
       }
+      // 刷新配额显示
+      if (window.wpAuth) window.wpAuth.showQuotaBar();
+      // 如果"我的构建"面板已打开，刷新列表
+      if (window.wpAuth) window.wpAuth.refreshPackages();
       setTimeout(() => {
         closeBuildModal();
         openSuccessModal();
@@ -767,6 +800,8 @@
       const errorStep = data.currentStep || '构建失败';
       showToast(`${errorStep}: ${errorMsg}`, 'error', 8000);
       closeBuildWs(); // 主动关闭，不触发重连
+      // 刷新配额显示
+      if (window.wpAuth) window.wpAuth.showQuotaBar();
     }
   }
 
@@ -870,7 +905,7 @@
       showToast('APK 文件下载已开始', 'success');
     } else if (currentTaskId) {
       // 降级：查询任务获取下载Token
-      fetch(`/api/task/${currentTaskId}`)
+      fetch(`/api/tasks/${currentTaskId}`)
         .then(r => r.json())
         .then(result => {
           if (result.success && result.data.downloadToken) {
@@ -956,8 +991,10 @@
   // ========== 平滑滚动 ==========
   $$('a[href^="#"]').forEach((anchor) => {
     anchor.addEventListener('click', (e) => {
+      const href = anchor.getAttribute('href');
+      if (!href || href === '#' || href === '#/') return;
       e.preventDefault();
-      const target = document.querySelector(anchor.getAttribute('href'));
+      const target = document.querySelector(href);
       if (target) {
         target.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
